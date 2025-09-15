@@ -1,3 +1,8 @@
+import os
+# Clear proxy variables before importing OpenAI
+for var in ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy']:
+    if var in os.environ:
+        del os.environ[var]
 from flask import Flask, render_template, request, jsonify
 import os
 from dotenv import load_dotenv
