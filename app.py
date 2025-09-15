@@ -1,7 +1,6 @@
 from flask import Flask, render_template, request, jsonify
 import os
 from dotenv import load_dotenv
-from auditor.analyzer import CodeAuditor
 
 # Load environment variables
 load_dotenv()
@@ -9,23 +8,38 @@ load_dotenv()
 # Initialize Flask app
 app = Flask(__name__)
 
-# Initialize auditor with error handling
+# Try to initialize auditor, but don't fail if it doesn't work
+auditor = None
 try:
+    from auditor.analyzer import CodeAuditor
     auditor = CodeAuditor(os.getenv('OPENAI_API_KEY'))
+    print("✅ CodeAuditor initialized successfully")
 except Exception as e:
-    print(f"Warning: Failed to initialize CodeAuditor: {e}")
-    auditor = None
+    print(f"⚠️  Failed to initialize CodeAuditor: {e}")
 
 @app.route('/')
 def index():
-    return render_template('index.html')
+    try:
+        return render_template('index.html')
+    except Exception as e:
+        return f"<h1>AuditAI</h1><p>App is running but template not found: {e}</p>"
+
+@app.route('/health')
+def health():
+    """Health check endpoint"""
+    return jsonify({
+        'status': 'healthy',
+        'auditor_available': auditor is not None,
+        'openai_key_present': bool(os.getenv('OPENAI_API_KEY'))
+    })
 
 @app.route('/analyze', methods=['POST'])
 def analyze():
     try:
-        # Check if auditor is available
         if not auditor:
-            return jsonify({'error': 'Code auditor is not available. Please check your API key configuration.'}), 500
+            return jsonify({
+                'error': 'Code auditor is not available. Check server logs for details.'
+            }), 500
         
         data = request.json
         if not data:
@@ -34,14 +48,13 @@ def analyze():
         code = data.get('code', '')
         platform = data.get('platform', 'unknown')
         
-        # Note: Your original code had 'prompt' but your analyzer expects 'code' first
         if not code:
             return jsonify({'error': 'Code is required'}), 400
         
-        # Call the audit_code method with correct parameters
+        # Call the audit_code method
         result = auditor.audit_code(code, platform)
         
-        # Convert AuditResult to dictionary for JSON serialization
+        # Convert AuditResult to dictionary
         result_dict = {
             'efficiency_score': result.efficiency_score,
             'complexity_score': result.complexity_score,
@@ -56,20 +69,6 @@ def analyze():
     
     except Exception as e:
         return jsonify({'error': f'Analysis failed: {str(e)}'}), 500
-
-@app.route('/health')
-def health():
-    """Health check endpoint for Railway"""
-    return jsonify({'status': 'healthy', 'auditor_available': auditor is not None})
-
-# Error handlers
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({'error': 'Endpoint not found'}), 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    return jsonify({'error': 'Internal server error'}), 500
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
