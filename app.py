@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from auditor.analyzer import CodeAuditor
 
 load_dotenv()
-
 app = Flask(__name__)
 auditor = CodeAuditor(os.getenv('OPENAI_API_KEY'))
 
@@ -30,4 +29,5 @@ def analyze():
         return jsonify({'error': str(e)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=True)
