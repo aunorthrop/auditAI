@@ -1,199 +1,192 @@
+import os
 import openai
-import re
 from typing import Dict, List, Any
 from .models import AuditResult, PlatformPatterns
 
 class CodeAuditor:
-    def __init__(self, api_key: str):
-        self.client = openai.OpenAI(api_key=api_key)
+    def __init__(self, api_key: str = None):
+        """Initialize the code auditor with OpenAI API key"""
+        self.api_key = api_key or os.getenv('OPENAI_API_KEY')
+        if not self.api_key:
+            raise ValueError("OpenAI API key is required")
         
-    def audit_code(self, prompt: str, code: str, platform: str = "unknown") -> Dict[str, Any]:
-        """Main audit function that analyzes code efficiency and potential issues"""
-        
-        # Get platform-specific patterns
-        platform_patterns = PlatformPatterns.get_patterns(platform)
-        
-        # Analyze with OpenAI
-        analysis = self._analyze_with_ai(prompt, code, platform_patterns)
-        
-        # Calculate metrics
-        efficiency_score = self._calculate_efficiency_score(prompt, code, analysis)
-        complexity_score = self._calculate_complexity(code)
-        bug_count = self._count_potential_bugs(analysis)
-        
-        # Extract insights
-        optimizations = self._extract_optimizations(analysis)
-        red_flags = self._detect_red_flags(prompt, code, analysis)
-        cost_analysis = self._analyze_costs(prompt, code)
-        
-        return {
-            'efficiency_score': efficiency_score,
-            'complexity_score': complexity_score,
-            'bug_count': bug_count,
-            'optimization_suggestions': optimizations,
-            'cost_analysis': cost_analysis,
-            'red_flags': red_flags,
-            'summary': analysis.get('summary', 'Analysis completed'),
-            'platform': platform
-        }
+        # Initialize OpenAI client (v1.0+ compatible)
+        self.client = openai.OpenAI(api_key=self.api_key)
     
-    def _analyze_with_ai(self, prompt: str, code: str, patterns: List[str]) -> Dict[str, Any]:
-        """Use OpenAI to analyze the code quality and efficiency"""
-        
-        system_prompt = f"""You are an expert code auditor. Analyze the given prompt and generated code for:
-
-1. Efficiency - Could this be solved more simply?
-2. Overengineering - Is the solution unnecessarily complex?
-3. Potential bugs or issues
-4. Whether the code actually solves the original prompt
-5. Signs of "time wasting" or unnecessary iterations
-
-Platform-specific issues to watch for: {', '.join(patterns) if patterns else 'None specified'}
-
-Respond in JSON format with:
-- summary: Brief overall assessment
-- efficiency_issues: List of efficiency problems
-- bugs: List of potential bugs
-- overengineered: Boolean if solution is too complex
-- matches_prompt: Boolean if code solves the original request
-- optimizations: List of suggested improvements
-"""
-
-        user_prompt = f"""
-ORIGINAL PROMPT:
-{prompt}
-
-GENERATED CODE:
-{code}
-
-Please analyze this code for efficiency, bugs, and whether it's appropriately solving the original prompt.
-"""
-        
+    def audit_code(self, code: str, platform: str = None, language: str = "python") -> AuditResult:
+        """Audit the provided code and return detailed analysis"""
         try:
+            # Get platform-specific patterns if specified
+            platform_patterns = PlatformPatterns.get_patterns(platform) if platform else []
+            
+            # Create the audit prompt
+            prompt = self._create_audit_prompt(code, platform_patterns, language)
+            
+            # Get analysis from OpenAI
             response = self.client.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": "You are an expert code auditor and security analyst."},
+                    {"role": "user", "content": prompt}
                 ],
+                max_tokens=1500,
                 temperature=0.1
             )
             
-            content = response.choices[0].message.content
-            # Try to parse as JSON, fallback to text analysis
-            try:
-                import json
-                return json.loads(content)
-            except:
-                return {"summary": content, "efficiency_issues": [], "bugs": [], "optimizations": []}
-                
+            # Parse the response
+            analysis = response.choices[0].message.content
+            return self._parse_analysis(analysis, code)
+            
         except Exception as e:
-            return {"summary": f"Analysis failed: {str(e)}", "efficiency_issues": [], "bugs": [], "optimizations": []}
+            # Fallback analysis in case of API issues
+            return self._fallback_analysis(code, str(e))
     
-    def _calculate_efficiency_score(self, prompt: str, code: str, analysis: Dict) -> int:
-        """Calculate efficiency score from 1-100"""
-        score = 100
+    def _create_audit_prompt(self, code: str, platform_patterns: List[str], language: str) -> str:
+        """Create a detailed prompt for code analysis"""
+        platform_context = ""
+        if platform_patterns:
+            platform_context = f"\nAlso check for these platform-specific issues: {', '.join(platform_patterns)}"
         
-        # Deduct points for various issues
-        if analysis.get('overengineered', False):
-            score -= 30
-        
-        score -= len(analysis.get('efficiency_issues', [])) * 10
-        score -= len(analysis.get('bugs', [])) * 15
-        
-        if not analysis.get('matches_prompt', True):
-            score -= 40
-        
-        # Code length vs prompt complexity
-        lines_of_code = len(code.split('\n'))
-        prompt_words = len(prompt.split())
-        
-        if lines_of_code > prompt_words * 3:  # Rough heuristic
-            score -= 20
-        
-        return max(1, min(100, score))
+        return f"""
+Please audit this {language} code and provide a detailed analysis:
+
+CODE:
+{code}
+
+Please analyze for:
+1. Code efficiency (score 1-100)
+2. Complexity score (1-10, where 10 is most complex)
+3. Potential bugs or issues
+4. Optimization suggestions
+5. Cost analysis (performance, maintainability)
+6. Security red flags
+7. Overall summary
+
+{platform_context}
+
+Format your response as structured analysis covering all these points.
+"""
     
-    def _calculate_complexity(self, code: str) -> int:
-        """Simple complexity score from 1-10"""
+    def _parse_analysis(self, analysis: str, code: str) -> AuditResult:
+        """Parse the AI analysis into structured AuditResult"""
+        # Basic parsing - in production, you'd want more sophisticated parsing
+        lines = analysis.split('\n')
+        
+        # Default values
+        efficiency_score = self._extract_score(analysis, "efficiency", 75)
+        complexity_score = self._extract_score(analysis, "complexity", 5)
+        bug_count = self._count_bugs(analysis)
+        optimization_suggestions = self._extract_suggestions(analysis)
+        red_flags = self._extract_red_flags(analysis)
+        summary = self._extract_summary(analysis)
+        
+        # Simple cost analysis
+        cost_analysis = {
+            "lines_of_code": len(code.split('\n')),
+            "estimated_runtime": "medium" if len(code) > 1000 else "low",
+            "maintainability": "good" if efficiency_score > 70 else "needs_improvement"
+        }
+        
+        return AuditResult(
+            efficiency_score=efficiency_score,
+            complexity_score=complexity_score,
+            bug_count=bug_count,
+            optimization_suggestions=optimization_suggestions,
+            cost_analysis=cost_analysis,
+            red_flags=red_flags,
+            summary=summary
+        )
+    
+    def _fallback_analysis(self, code: str, error_msg: str) -> AuditResult:
+        """Provide basic analysis when API is unavailable"""
         lines = code.split('\n')
-        complexity = 1
+        non_empty_lines = [line for line in lines if line.strip()]
         
-        # Count nested structures
-        nesting_level = 0
-        max_nesting = 0
+        return AuditResult(
+            efficiency_score=70,  # Default moderate score
+            complexity_score=5,   # Default moderate complexity
+            bug_count=0,
+            optimization_suggestions=[
+                "API analysis unavailable - manual review recommended",
+                "Consider code formatting and structure improvements"
+            ],
+            cost_analysis={
+                "lines_of_code": len(non_empty_lines),
+                "estimated_runtime": "unknown",
+                "maintainability": "requires_analysis",
+                "api_error": error_msg
+            },
+            red_flags=["API analysis unavailable"],
+            summary=f"Basic analysis: {len(non_empty_lines)} lines of code. Full analysis unavailable due to API issues."
+        )
+    
+    def _extract_score(self, text: str, score_type: str, default: int) -> int:
+        """Extract numeric scores from analysis text"""
+        import re
+        pattern = rf"{score_type}.*?(\d+)"
+        match = re.search(pattern, text.lower())
+        if match:
+            return min(100, max(1, int(match.group(1))))
+        return default
+    
+    def _count_bugs(self, text: str) -> int:
+        """Count potential bugs mentioned in analysis"""
+        bug_keywords = ["bug", "issue", "problem", "error", "vulnerability"]
+        count = 0
+        for keyword in bug_keywords:
+            count += text.lower().count(keyword)
+        return min(count, 10)  # Cap at 10 for reasonableness
+    
+    def _extract_suggestions(self, text: str) -> List[str]:
+        """Extract optimization suggestions from analysis"""
+        suggestions = []
+        lines = text.split('\n')
         
         for line in lines:
-            stripped = line.strip()
-            if any(keyword in stripped for keyword in ['if ', 'for ', 'while ', 'def ', 'class ']):
-                nesting_level += 1
-                max_nesting = max(max_nesting, nesting_level)
-            
-            # Simple heuristic for closing blocks
-            if line.strip() == '' or not line.startswith(' ' * (nesting_level * 4)):
-                nesting_level = max(0, nesting_level - 1)
+            line = line.strip()
+            if any(word in line.lower() for word in ['suggest', 'recommend', 'improve', 'optimize', 'consider']):
+                if len(line) > 10:  # Avoid very short lines
+                    suggestions.append(line)
         
-        complexity += max_nesting
-        complexity += len(lines) // 50  # Add complexity for length
+        # Default suggestions if none found
+        if not suggestions:
+            suggestions = [
+                "Consider adding error handling",
+                "Review variable naming conventions",
+                "Add documentation and comments"
+            ]
         
-        return min(10, complexity)
+        return suggestions[:5]  # Limit to 5 suggestions
     
-    def _count_potential_bugs(self, analysis: Dict) -> int:
-        """Count potential bugs from analysis"""
-        return len(analysis.get('bugs', []))
-    
-    def _extract_optimizations(self, analysis: Dict) -> List[str]:
-        """Extract optimization suggestions"""
-        optimizations = analysis.get('optimizations', [])
-        efficiency_issues = analysis.get('efficiency_issues', [])
-        
-        # Combine and clean up suggestions
-        all_suggestions = optimizations + [f"Fix: {issue}" for issue in efficiency_issues]
-        
-        return all_suggestions[:5]  # Limit to top 5 suggestions
-    
-    def _detect_red_flags(self, prompt: str, code: str, analysis: Dict) -> List[str]:
-        """Detect potential signs of time-wasting or overcharging"""
+    def _extract_red_flags(self, text: str) -> List[str]:
+        """Extract security and quality red flags"""
         red_flags = []
+        flag_keywords = ["security", "vulnerable", "risk", "dangerous", "warning", "critical"]
         
-        # Check if solution is way more complex than needed
-        if analysis.get('overengineered', False):
-            red_flags.append("🚩 Solution appears over-engineered for the given prompt")
+        lines = text.split('\n')
+        for line in lines:
+            if any(keyword in line.lower() for keyword in flag_keywords):
+                if len(line.strip()) > 10:
+                    red_flags.append(line.strip())
         
-        # Check for excessive code length
-        prompt_words = len(prompt.split())
-        code_lines = len([line for line in code.split('\n') if line.strip()])
-        
-        if code_lines > prompt_words * 2:
-            red_flags.append(f"🚩 Code is unusually long ({code_lines} lines for {prompt_words} word prompt)")
-        
-        # Check for common time-wasting patterns
-        if 'import' in code and code.count('import') > 5:
-            red_flags.append("🚩 Excessive imports may indicate unnecessary complexity")
-        
-        if not analysis.get('matches_prompt', True):
-            red_flags.append("🚩 Generated code doesn't appear to solve the original request")
-        
-        bug_count = len(analysis.get('bugs', []))
-        if bug_count > 3:
-            red_flags.append(f"🚩 High number of potential bugs ({bug_count}) - may require multiple fix iterations")
-        
-        return red_flags
+        return red_flags[:3]  # Limit to 3 most important flags
     
-    def _analyze_costs(self, prompt: str, code: str) -> Dict[str, Any]:
-        """Analyze cost efficiency"""
-        prompt_complexity = len(prompt.split())
-        code_complexity = len(code.split('\n'))
+    def _extract_summary(self, text: str) -> str:
+        """Extract or generate summary from analysis"""
+        lines = text.split('\n')
         
-        # Rough cost estimates (these would be more accurate with real pricing data)
-        estimated_tokens_used = prompt_complexity + code_complexity * 2
-        estimated_cost = estimated_tokens_used * 0.002  # Rough GPT-3.5 pricing
+        # Look for summary section
+        for i, line in enumerate(lines):
+            if 'summary' in line.lower():
+                # Get next few lines
+                summary_lines = lines[i+1:i+4]
+                summary = ' '.join([l.strip() for l in summary_lines if l.strip()])
+                if summary:
+                    return summary
         
-        # Determine if this was efficient
-        efficiency_ratio = prompt_complexity / code_complexity if code_complexity > 0 else 0
+        # Fallback: use first substantial paragraph
+        for line in lines:
+            if len(line.strip()) > 50:
+                return line.strip()
         
-        return {
-            'estimated_tokens': estimated_tokens_used,
-            'estimated_cost': round(estimated_cost, 4),
-            'efficiency_ratio': round(efficiency_ratio, 2),
-            'cost_per_line': round(estimated_cost / max(1, code_complexity), 4)
-        }
+        return "Code analysis completed. Review detailed metrics for insights."
